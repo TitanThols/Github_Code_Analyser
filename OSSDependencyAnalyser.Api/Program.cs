@@ -5,12 +5,25 @@ using Microsoft.Extensions.Options;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.SignalR;
 using Scalar.AspNetCore;
+using Refit;
+using OSSDependencyAnalyzer.API.Integrations.Github;
+using OSSDependencyAnalyzer.API.Integrations.DependencyParsing;
+using OSSDependencyAnalyzer.API.Integrations.DependencyParsing.Parsers;
+using OSSDependencyAnalyzer.API.Integrations.DependencyParsing.Parsesrs;
 
 public partial class Program
 {
     private static void Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
+
+        builder.Services.AddTransient<IDependencyParser, NpmPackageJsonParser>();
+        builder.Services.AddTransient<IDependencyParser, CsProjParser>();
+        builder.Services.AddTransient<IDependencyParser, GemfileParser>();
+        builder.Services.AddTransient<IDependencyParser, PomXmlParser>();
+        builder.Services.AddTransient<IDependencyParser, PyprojectTomlParser>();
+        builder.Services.AddTransient<IDependencyParser, PythonRequirementsParser>();
+
 
         Log.Logger = new LoggerConfiguration()
             .MinimumLevel.Information()
@@ -29,6 +42,19 @@ public partial class Program
             options.UseNpgsql(connectionString)
             .EnableSensitiveDataLogging(builder.Environment.IsDevelopment())
         );
+
+        var githubToken = builder.Configuration["GithubApi:Token"];
+        builder.Services.AddRefitClient<IGithubApiClient>()
+            .ConfigureHttpClient(c =>
+            {
+                c.BaseAddress = new Uri("https://api.github.com");
+                c.DefaultRequestHeaders.Add("Authorization", $"Bearer {githubToken}");
+                c.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
+                c.DefaultRequestHeaders.Add("Accept", "application/vnd.github.v3.raw");
+                c.DefaultRequestHeaders.Add("User-Agent", "OSSDependencyAnalyzer");
+            });
+
+        builder.Services.AddTransient<IGithubApiService, GithubApiService>();
 
         builder.Services.AddStackExchangeRedisCache(Options =>
         {
