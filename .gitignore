@@ -64,6 +64,7 @@ appsettings.*.json
 .env.*.local
 *.pem
 *.key
+OSSDependencyAnalyser.API/appsettings.json
 
 # ============================================================================
 # IDE / Editor Files

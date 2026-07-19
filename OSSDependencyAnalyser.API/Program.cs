@@ -10,9 +10,13 @@ using OSSDependencyAnalyzer.API.Integrations.Github;
 using OSSDependencyAnalyzer.API.Integrations.DependencyParsing;
 using OSSDependencyAnalyzer.API.Integrations.DependencyParsing.Parsers;
 using OSSDependencyAnalyzer.API.Integrations.DependencyParsing.Parsesrs;
+using Hangfire;
+using Hangfire.PostgreSql;
+using OSSDependencyAnalyzer.API.Services;
 
 public partial class Program
 {
+    [Obsolete]
     private static void Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
@@ -42,6 +46,13 @@ public partial class Program
             options.UseNpgsql(connectionString)
             .EnableSensitiveDataLogging(builder.Environment.IsDevelopment())
         );
+
+        builder.Services.AddHangfire(config =>
+            config.UsePostgreSqlStorage(connectionString)
+        );
+        builder.Services.AddHangfireServer();
+
+        builder.Services.AddTransient<IAnalyzerService, AnalyzerService>();
 
         var githubToken = builder.Configuration["GithubApi:Token"];
         builder.Services.AddRefitClient<IGithubApiClient>()
@@ -85,6 +96,7 @@ public partial class Program
         app.UseAuthorization();
         app.MapControllers();
         app.MapHub<AlertHub>("/hubs/alerts");
+        app.MapHangfireDashboard();
 
         app.Run();
     }
