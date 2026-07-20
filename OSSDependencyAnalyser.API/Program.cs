@@ -13,6 +13,8 @@ using OSSDependencyAnalyzer.API.Integrations.DependencyParsing.Parsesrs;
 using Hangfire;
 using Hangfire.PostgreSql;
 using OSSDependencyAnalyzer.API.Services;
+using OSSDependencyAnalyzer.API.Integrations;
+using OSSDependencyAnalyzer.API.Integrations.CVE;
 
 public partial class Program
 {
@@ -27,7 +29,10 @@ public partial class Program
         builder.Services.AddTransient<IDependencyParser, PomXmlParser>();
         builder.Services.AddTransient<IDependencyParser, PyprojectTomlParser>();
         builder.Services.AddTransient<IDependencyParser, PythonRequirementsParser>();
-
+        builder.Services.AddTransient<IRiskScoringService, RiskScoringService>();
+        builder.Services.AddTransient<IDependencyParserFactory, DependencyParserFactory>();
+        builder.Services.AddTransient<ICveService, CveService>();
+        builder.Services.AddTransient<IAnalyzerService, AnalyzerService>();
 
         Log.Logger = new LoggerConfiguration()
             .MinimumLevel.Information()
@@ -52,9 +57,8 @@ public partial class Program
         );
         builder.Services.AddHangfireServer();
 
-        builder.Services.AddTransient<IAnalyzerService, AnalyzerService>();
-
         var githubToken = builder.Configuration["GithubApi:Token"];
+        
         builder.Services.AddRefitClient<IGithubApiClient>()
             .ConfigureHttpClient(c =>
             {
@@ -62,6 +66,21 @@ public partial class Program
                 c.DefaultRequestHeaders.Add("Authorization", $"Bearer {githubToken}");
                 c.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
                 c.DefaultRequestHeaders.Add("Accept", "application/vnd.github.v3.raw");
+                c.DefaultRequestHeaders.Add("User-Agent", "OSSDependencyAnalyzer");
+            });
+
+        builder.Services.AddRefitClient<IgithubAdvisoriesClient>()
+            .ConfigureHttpClient(c =>
+            {
+                c.BaseAddress = new Uri("https://api.github.com");
+                c.DefaultRequestHeaders.Add("Authorization", $"Bearer {githubToken}");
+                c.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
+            });
+
+        builder.Services.AddRefitClient<INvdApiClient>()
+            .ConfigureHttpClient(c =>
+            {
+                c.BaseAddress = new Uri("https://services.nvd.nist.gov/rest/json/cves/2.0");
                 c.DefaultRequestHeaders.Add("User-Agent", "OSSDependencyAnalyzer");
             });
 
