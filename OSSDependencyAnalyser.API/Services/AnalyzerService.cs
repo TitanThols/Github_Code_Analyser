@@ -21,6 +21,8 @@ public class AnalyzerService : IAnalyzerService
     private readonly IDependencyParserFactory _parserFactory;
     private readonly ICveService _cveService;
     private readonly IRiskScoringService _riskScoringService;
+    private readonly ISnapshotService _snapshotservice;
+    private readonly IAlertService _alertService;
     private readonly ILogger<AnalyzerService> _logger;
 
     private static readonly List<string> DependencyFiles = new()
@@ -39,6 +41,8 @@ public class AnalyzerService : IAnalyzerService
         IDependencyParserFactory parserFactory,
         ICveService cveService,
         IRiskScoringService riskScoringService,
+        ISnapshotService snapshotservice,
+        IAlertService alertService,
         ILogger<AnalyzerService> logger)
     {
         _db = db;
@@ -46,6 +50,8 @@ public class AnalyzerService : IAnalyzerService
         _parserFactory = parserFactory;
         _cveService = cveService;
         _riskScoringService = riskScoringService;
+        _snapshotservice = snapshotservice;
+        _alertService = alertService;
         _logger = logger;
     }
 
@@ -220,6 +226,15 @@ public class AnalyzerService : IAnalyzerService
             repository.MediumVulnerabilities = mediumCount;
 
             await _db.SaveChangesAsync(cancellationToken);
+
+            foreach (var vuln in allVulnerabilities)
+            {
+                await _alertService.SendVulnerabilityAlertAsync(repositoryId, vuln);
+            }
+
+            await _snapshotservice.CreateVulnerabilitysnapshotAsync(repositoryId);
+
+            await _alertService.SendAnalysisCompletedAlertAsync(repositoryId, repository.RepositoryName);
 
             _logger.LogInformation(
                 "Analysis completed for {Url}. Found {Dependencies} dependencies, {Vulns} vulnerabilities",

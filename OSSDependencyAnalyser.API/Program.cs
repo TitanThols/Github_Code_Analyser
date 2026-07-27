@@ -15,6 +15,7 @@ using Hangfire.PostgreSql;
 using OSSDependencyAnalyzer.API.Services;
 using OSSDependencyAnalyzer.API.Integrations;
 using OSSDependencyAnalyzer.API.Integrations.CVE;
+using OSSDependencyAnalyzer.API.Jobs;
 
 public partial class Program
 {
@@ -33,6 +34,8 @@ public partial class Program
         builder.Services.AddTransient<IDependencyParserFactory, DependencyParserFactory>();
         builder.Services.AddTransient<ICveService, CveService>();
         builder.Services.AddTransient<IAnalyzerService, AnalyzerService>();
+        builder.Services.AddTransient<ISnapshotService, SnapshotService>();
+        builder.Services.AddTransient<IAlertService, AlertService>();
 
         Log.Logger = new LoggerConfiguration()
             .MinimumLevel.Information()
@@ -40,6 +43,7 @@ public partial class Program
             .CreateLogger();
 
         builder.Host.UseSerilog();
+
 
         builder.Services.AddControllers();
         builder.Services.AddEndpointsApiExplorer();
@@ -57,8 +61,20 @@ public partial class Program
         );
         builder.Services.AddHangfireServer();
 
+        builder.Services.AddHangfire(config =>
+            config.UsePostgreSqlStorage(connectionString)
+        );
+        builder.Services.AddHangfireServer();
+
         var githubToken = builder.Configuration["GithubApi:Token"];
-        
+
+        var recurringJobManager = new RecurringJobManager(JobStorage.Current);
+        recurringJobManager.AddOrUpdate<DailySnapshotJob>(
+            "daily-vulnerability-snapshots",
+            x => x.ExecuteAsync(),
+            Cron.Daily
+        );
+
         builder.Services.AddRefitClient<IGithubApiClient>()
             .ConfigureHttpClient(c =>
             {
