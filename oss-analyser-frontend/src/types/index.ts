@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 export type AnalysisStatus = 'Pending' | 'Parsing' | 'FetchingVulnerabilities' | 'Completed' | 'Failed';
 
 export type Severity = 'Low' | 'Medium' | 'High' | 'Critical';
@@ -5,6 +7,7 @@ export type Severity = 'Low' | 'Medium' | 'High' | 'Critical';
 export type DependencyType = 'NPM' | 'PuPI' | 'NuGet' | 'Maven' | 'Gem' | 'Gradle' | 'Pub' | 'Composer';
 
 export interface Repository {
+    repositoryName: ReactNode;
     id: string;
     repositoryUrl: string;
     status: AnalysisStatus;
