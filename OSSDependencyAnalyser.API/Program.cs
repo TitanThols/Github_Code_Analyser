@@ -61,19 +61,7 @@ public partial class Program
         );
         builder.Services.AddHangfireServer();
 
-        builder.Services.AddHangfire(config =>
-            config.UsePostgreSqlStorage(connectionString)
-        );
-        builder.Services.AddHangfireServer();
-
         var githubToken = builder.Configuration["GithubApi:Token"];
-
-        var recurringJobManager = new RecurringJobManager(JobStorage.Current);
-        recurringJobManager.AddOrUpdate<DailySnapshotJob>(
-            "daily-vulnerability-snapshots",
-            x => x.ExecuteAsync(),
-            Cron.Daily
-        );
 
         builder.Services.AddRefitClient<IGithubApiClient>()
             .ConfigureHttpClient(c =>
@@ -119,6 +107,13 @@ public partial class Program
         });
 
         var app = builder.Build();
+
+        var recurringJobManager = app.Services.GetRequiredService<IRecurringJobManager>();
+        recurringJobManager.AddOrUpdate<DailySnapshotJob>(
+            "daily-vulnerability-snapshots",
+            x => x.ExecuteAsync(),
+            Cron.Daily
+        );
 
         if (app.Environment.IsDevelopment())
         {

@@ -1,4 +1,6 @@
-namespace OSSDependencyAnalyzer.API.DTOs;
+using OSSDependencyAnalyser.API.DTOs;
+
+namespace OSSDependencyAnalyser.API.DTOs;
 
 public class DependencyResponseDto
 {

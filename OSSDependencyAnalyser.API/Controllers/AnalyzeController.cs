@@ -1,6 +1,7 @@
 using OSSDependencyAnalyzer.API.Data;
 using OSSDependencyAnalyzer.API.Models;
 using OSSDependencyAnalyzer.API.Services;
+using OSSDependencyAnalyser.API.DTOs;
 using Hangfire;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -51,7 +52,20 @@ public class AnalyzeController : ControllerBase
 
             _logger.LogInformation("Analysis requested for {Owner}/{Repo}", owner, repo);
     
-            var repository = new Repository
+            var repository = await _db.Repositories.FirstOrDefaultAsync(r => r.GithubUrl == request.RepositoryUrl, cancellationToken);
+            if (repository != null)
+            {
+                _logger.LogInformation("Repository {Owner}/{Repo} already exists, returning existing", owner, repo);
+                return Ok(new RepositoryResponseDto
+                {
+                    Id = repository.Id,
+                    GitHubUrl = repository.GithubUrl,
+                    Status = repository.Status.ToString(),
+                    CreatedAt = repository.CreatedAt
+                });
+            }
+
+            repository = new Repository
             {
                 Id = Guid.NewGuid(),
                 GithubUrl = request.RepositoryUrl,
@@ -82,7 +96,7 @@ public class AnalyzeController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to start analysis");
-            return StatusCode(500, new { error = "Failed to start analysis" });
+            return StatusCode(500, new { error = "Failed to start analysis", details = ex.ToString() });
         }
     }
     [HttpGet("{id:guid}")]
@@ -111,6 +125,52 @@ public class AnalyzeController : ControllerBase
             MediumVulnerabilities = repository.MediumVulnerabilities,
             ErrorMessage = repository.ErrorMessage
         });
+    }
+
+    [HttpGet("{id:guid}/dependencies")]
+    public async Task<ActionResult<List<DependencyResponseDto>>> GetDependencies(Guid id, CancellationToken cancellationToken)
+    {
+        var dependencies = await _db.Dependencies
+            .Include(d => d.Vulnerabilities)
+            .Where(d => d.RepositoryId == id)
+            .Select(d => new DependencyResponseDto
+            {
+                Id = d.Id,
+                PackageName = d.PackageName,
+                CurrentVersion = d.CurrentVersion,
+                LatestVersion = d.LatestVersion,
+                Type = d.Type.ToString(),
+                VulnerabilityCount = d.Vulnerabilities.Count
+            })
+            .ToListAsync(cancellationToken);
+
+        return Ok(dependencies);
+    }
+
+    [HttpGet("{id:guid}/vulnerabilities")]
+    public async Task<ActionResult<List<VulnerabilityResponseDto>>> GetVulnerabilities(Guid id, CancellationToken cancellationToken)
+    {
+        var vulnerabilities = await _db.Vulnerabilities
+            .Include(v => v.Dependency)
+            .Where(v => v.Dependency.RepositoryId == id)
+            .Select(v => new VulnerabilityResponseDto
+            {
+                Id = v.Id,
+                CveId = v.CveId,
+                Title = v.Title,
+                Description = v.Description,
+                Severity = v.Severity.ToString(),
+                CvssScore = v.CvssScore,
+                RiskScore = v.RiskScore,
+                IsExploitable = v.IsExploitable,
+                AffectedVersionRange = v.AffectedVersionRange,
+                RemediationVersion = v.RemediationVersion,
+                PublishedAt = v.PublishedAt,
+                PackageName = v.Dependency.PackageName
+            })
+            .ToListAsync(cancellationToken);
+
+        return Ok(vulnerabilities);
     }
 
     [HttpGet]

@@ -1,24 +1,24 @@
-import type { ReactNode } from "react";
-
 export type AnalysisStatus = 'Pending' | 'Parsing' | 'FetchingVulnerabilities' | 'Completed' | 'Failed';
 
 export type Severity = 'Low' | 'Medium' | 'High' | 'Critical';
 
-export type DependencyType = 'NPM' | 'PuPI' | 'NuGet' | 'Maven' | 'Gem' | 'Gradle' | 'Pub' | 'Composer';
+export type DependencyType = 'NPM' | 'PyPI' | 'NuGet' | 'Maven' | 'Gem' | 'Gradle' | 'Pub' | 'Composer';
 
 export interface Repository {
-    repositoryName: ReactNode;
     id: string;
-    repositoryUrl: string;
-    status: AnalysisStatus;
+    repositoryName?: string;
+    repositoryUrl?: string;
+    gitHubUrl?: string;
+    repositoryOwner?: string;
+    status: AnalysisStatus | string;
     createdAt: string;
-    completedAt: string;
-    totalDependencies: number;
-    dependenciesCount: number;
-    criticalVulnerabilities: number;
-    highVulnerabilities: number;
-    mediumVulnerabilities: number;
-    errorMessage: string;
+    completedAt?: string | null;
+    totalDependencies?: number;
+    dependenciesCount?: number;
+    criticalVulnerabilities?: number;
+    highVulnerabilities?: number;
+    mediumVulnerabilities?: number;
+    errorMessage?: string | null;
 }
 
 export interface Dependency {

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import type { Repository } from "../types";
 import { listRepositories } from "../api/repositories";
 
@@ -19,22 +20,40 @@ const RepositoryListPage = () => {
         }
         fetchData();
     }, []);
-    if (isLoading) return <p>Loading...</p>;
-    if (!repos) return <p>Repositories not found</p>;
+
+    if (isLoading) return <div className="loading-state">Loading repositories…</div>;
 
     return (
-        <div className="repo-list-page">
-            <h2>Repositories List</h2>
+        <div className="dashboard-page">
+            <div className="hero-card">
+                <div>
+                    <p className="eyebrow">Repository overview</p>
+                    <h2>All Analyzed Repositories</h2>
+                    <p className="hero-text">{repos.length} repositories tracked</p>
+                </div>
+            </div>
+
             <div className="repo-list">
-                {repos.map((repo) => (
-                    <div key={repo.id} className="repo-item">
-                        <span>{repo.repositoryUrl}/{repo.repositoryName}</span>
-                        <span>{repo.status}</span>
+                {repos.length === 0 ? (
+                    <div className="card">
+                        <p className="muted">No repositories analyzed yet. Go to Analyze to scan one.</p>
                     </div>
+                ) : repos.map((repo) => (
+                    <Link to={`/repository/${repo.id}`} key={repo.id} style={{ textDecoration: 'none', color: 'inherit' }}>
+                        <div className="repo-item">
+                            <div>
+                                <strong>{repo.repositoryName ?? repo.repositoryOwner ?? 'Repository'}</strong>
+                                <p>{repo.repositoryUrl ?? repo.gitHubUrl}</p>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <span className={`repo-status ${repo.status.toLowerCase()}`}>{repo.status}</span>
+                            </div>
+                        </div>
+                    </Link>
                 ))}
             </div>
         </div>
-    )
+    );
 };
 
 export default RepositoryListPage;

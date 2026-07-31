@@ -18,7 +18,7 @@ const AnalyzePage = () => {
             setError(null);
 
             const result = await analyzeRepository(url);
-            navigate(`/analyze/${result.id}`);
+            navigate(`/repository/${result.id}`);
         } catch (err) {
             setError('Failed to analyze repository');
         } finally {
