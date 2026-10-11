@@ -1,61 +1,48 @@
 using System.Text.Json;
-using OSSDependencyAnalyzer.API.Integrations.DependencyParsing;
 using OSSDependencyAnalyzer.API.Models;
-using Serilog;
 
 namespace OSSDependencyAnalyzer.API.Integrations.DependencyParsing.Parsers;
 
-public class NpmPackageJsonParser : IDependencyParser
+public sealed class NpmPackageJsonParser : IDependencyParser
 {
-   private readonly ILogger<NpmPackageJsonParser> _logger;
-   public DependencyFileType FileType => DependencyFileType.PackageJson;
-   public NpmPackageJsonParser(ILogger<NpmPackageJsonParser> logger)
-    {
-        _logger = logger;
-    }
+    public DependencyFileType FileType => DependencyFileType.PackageJson;
 
-    public async Task<List<ParsedDependency>> ParseAsync(string fileContent)
-    {
-        var dependencies = new List<ParsedDependency>();
+    public bool CanParse(string fileName) => fileName.Equals("package.json", StringComparison.OrdinalIgnoreCase);
 
+    public IReadOnlyList<ParsedDependency> Parse(string fileContent)
+    {
         try
         {
-            using var doc = JsonDocument.Parse(fileContent);
-            var root = doc.RootElement;
-
-            if(root.TryGetProperty("dependencies", out var depObj))
+            using var doc = JsonDocument.Parse(fileContent, new JsonDocumentOptions
             {
-                foreach(var dep in depObj.EnumerateObject())
-                {
-                    var version = dep.Value.GetString() ?? "Unknown";
-                    dependencies.Add(new ParsedDependency
-                    {
-                        PackageName = dep.Name,
-                        Version = version,
-                        Type = DependencyType.NPM
-                    });
-                }
-            }
+                AllowTrailingCommas = true,
+                CommentHandling = JsonCommentHandling.Skip
+            });
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                throw new DependencyParseException("package.json root must be an object.");
 
-            if(root.TryGetProperty("devDependencies", out var devDepObj))
-            {
-                foreach(var dep in depObj.EnumerateObject())
-                {
-                    var version = dep.Value.GetString() ?? "Unknown";
-                    dependencies.Add(new ParsedDependency
-                    {
-                        PackageName = dep.Name,
-                        Version = version,
-                        Type = DependencyType.NPM
-                    });
-                }
-            }
-            _logger.LogInformation("Parsed {count} NPM dependencies from package.json", dependencies.Count);
-        } catch(JsonException ex)
-        {
-            _logger.LogError(ex, "Failed to parse package.json");
-            throw;
+            var dependencies = new List<ParsedDependency>();
+            Collect(doc.RootElement, "dependencies", isDev: false, dependencies);
+            Collect(doc.RootElement, "optionalDependencies", isDev: false, dependencies);
+            Collect(doc.RootElement, "devDependencies", isDev: true, dependencies);
+            return dependencies;
         }
-        return dependencies;
+        catch (JsonException ex)
+        {
+            throw new DependencyParseException("package.json is not valid JSON.", ex);
+        }
+    }
+
+    private static void Collect(JsonElement root, string section, bool isDev, List<ParsedDependency> output)
+    {
+        if (!root.TryGetProperty(section, out var deps) || deps.ValueKind != JsonValueKind.Object)
+            return;
+
+        foreach (var dep in deps.EnumerateObject())
+        {
+            if (dep.Value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(dep.Name))
+                continue;
+            output.Add(new ParsedDependency(dep.Name, dep.Value.GetString()!, DependencyType.NPM, isDev));
+        }
     }
 }
