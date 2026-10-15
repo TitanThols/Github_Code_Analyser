@@ -1,106 +1,140 @@
-using System.Text;
+using System.Net;
+using System.Net.Http.Json;
 using Microsoft.Extensions.Caching.Distributed;
-using OSSDependencyAnalyzer.API.Integrations.API;
-using OSSDependencyAnalyzer.API.Models;
-using Refit;
-using Serilog;
+using OSSDependencyAnalyzer.API.Integrations.DependencyParsing;
 
 namespace OSSDependencyAnalyzer.API.Integrations.Github;
 
 public interface IGithubApiService
 {
-    Task<GithubRepositoryDto> GetRepositoryAsync(string owner, string repo);
-    Task<string?> GetFileContentAsync(string owner, string repo, string filePath);
+    /// <exception cref="GitHubRepositoryNotFoundException">The repository doesn't exist or isn't public.</exception>
+    Task<RepositoryMetadata> GetRepositoryAsync(string owner, string repo, CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<ManifestFile>> FindManifestsAsync(string owner, string repo, string gitRef, CancellationToken cancellationToken);
+
+    Task<string?> GetFileContentAsync(string owner, string repo, string gitRef, ManifestFile file, CancellationToken cancellationToken);
 }
 
-public class GithubApiService : IGithubApiService
+public sealed class GithubApiService(
+    IHttpClientFactory httpClientFactory,
+    IDependencyParserFactory parserFactory,
+    IDistributedCache cache,
+    ILogger<GithubApiService> logger) : IGithubApiService
 {
-    private readonly IGithubApiClient _client;
-    private readonly IDistributedCache _cache;
-    private readonly ILogger<GithubApiService> _logger;
-    private const int CacheDurationMinutes = 60;
+    public const string ApiClientName = "GitHubApi";
+    public const string RawClientName = "GitHubRaw";
 
-    public GithubApiService(IGithubApiClient client, IDistributedCache cache, ILogger<GithubApiService> logger)
+    internal const int MaxManifests = 40;
+    internal const long MaxManifestBytes = 1_000_000;
+
+    /// <summary>Directories whose manifests describe vendored, generated, sample or fixture code rather than the project itself.</summary>
+    private static readonly HashSet<string> IgnoredDirectories = new(StringComparer.OrdinalIgnoreCase)
     {
-        _client = client;
-        _cache = cache;
-        _logger = logger;
+        "node_modules", "bower_components", "vendor", "third_party", "third-party", ".git", ".yarn", ".venv", "venv",
+        "dist", "build", "out", "target", "bin", "obj", "fixtures", "__fixtures__", "testdata", "test-fixtures",
+        "examples", "example", "samples", "sample", "docs", "site-packages"
+    };
+
+    /// <summary>Probed at the repository root when the tree API is unavailable (rate limit, huge repo).</summary>
+    internal static readonly string[] RootCandidates =
+    [
+        "package.json", "requirements.txt", "pyproject.toml", "pom.xml", "build.gradle", "build.gradle.kts",
+        "Gemfile", "go.mod", "composer.json", "Cargo.toml", "Directory.Packages.props"
+    ];
+
+    public async Task<RepositoryMetadata> GetRepositoryAsync(string owner, string repo, CancellationToken cancellationToken)
+    {
+        var client = httpClientFactory.CreateClient(ApiClientName);
+        using var response = await client.GetAsync($"repos/{Escape(owner)}/{Escape(repo)}", cancellationToken);
+
+        if (response.StatusCode == HttpStatusCode.NotFound)
+            throw new GitHubRepositoryNotFoundException($"{owner}/{repo}");
+
+        if (!response.IsSuccessStatusCode)
+        {
+            // Usually the unauthenticated 60 req/h quota. Raw content still works, so carry on without metadata.
+            logger.LogWarning("GitHub metadata request for {Owner}/{Repo} returned {Status}; continuing without metadata",
+                owner, repo, (int)response.StatusCode);
+            return new RepositoryMetadata(null, null, null, "HEAD");
+        }
+
+        var dto = await response.Content.ReadFromJsonAsync<GithubRepositoryDto>(cancellationToken);
+        if (dto is null || dto.Private)
+            throw new GitHubRepositoryNotFoundException($"{owner}/{repo}");
+
+        return new RepositoryMetadata(dto.Description, dto.Language, dto.StargazersCount, dto.DefaultBranch ?? "HEAD");
     }
 
-    public async Task<GithubRepositoryDto> GetRepositoryAsync(string owner, string repo)
+    public async Task<IReadOnlyList<ManifestFile>> FindManifestsAsync(string owner, string repo, string gitRef, CancellationToken cancellationToken)
     {
-        var cacheKey = $"github:repo:{owner}:{repo}";
-
-        var cachedData = await _cache.GetAsync(cacheKey);
-        if(cachedData != null)
-        {
-            _logger.LogInformation("Cache hit repository {Owner}/{Repo}", owner, repo);
-            var json = Encoding.UTF8.GetString(cachedData);
-            return System.Text.Json.JsonSerializer.Deserialize<GithubRepositoryDto>(json)!;
-        }
-
+        var client = httpClientFactory.CreateClient(ApiClientName);
         try
         {
-            _logger.LogInformation("Fetching repository metadata from Github: {Owner}/{Repo}", owner, repo);
-            var repo_data = await _client.GetRepositoryAsync(owner, repo);
-            var json = System.Text.Json.JsonSerializer.Serialize(repo_data);
-            await _cache.SetAsync(cacheKey, Encoding.UTF8.GetBytes(json), new DistributedCacheEntryOptions
+            using var response = await client.GetAsync(
+                $"repos/{Escape(owner)}/{Escape(repo)}/git/trees/{Escape(gitRef)}?recursive=1", cancellationToken);
+
+            if (response.IsSuccessStatusCode)
             {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(CacheDurationMinutes)
-            });
-
-            return repo_data;
-        } catch(HttpRequestException ex)
-        {
-            _logger.LogError(ex, "Failed to fetch repository {Owner}/{Repo}", owner, repo);
-            throw;
-        }
-    }
-    public async Task<string?> GetFileContentAsync(string owner, string repo, string filePath)
-    {
-        var cacheKey = $"github;file:{owner}:{repo}:{filePath}";
-
-        var cachedData = await _cache.GetAsync(cacheKey);
-        if (cachedData != null)
-        {
-            _logger.LogInformation("Cache hit for file {filepath}", filePath);
-            return Encoding.UTF8.GetString(cachedData);
-        }
-
-        try
-        {
-            _logger.LogInformation("Fetching file content: {Owner}/{Repo}/{FilePath}", owner, repo, filePath);
-            var fileContent = await _client.GetFileContentAsync(owner, repo, filePath);
-
-            string decodedContent = string.Empty;
-            if (!string.IsNullOrEmpty(fileContent.Content))
-            {
-                try
+                var tree = await response.Content.ReadFromJsonAsync<GithubTreeResponse>(cancellationToken);
+                if (tree is not null)
                 {
-                    decodedContent = Encoding.UTF8.GetString(Convert.FromBase64String(fileContent.Content));
-                }catch(FormatException ex)
-                {
-                    _logger.LogWarning(ex, "Failed to decode Base64 content for {FilePath}", filePath);
-                    return null;
+                    var manifests = SelectManifests(tree.Tree);
+                    logger.LogInformation("Discovered {Count} manifests in {Owner}/{Repo} (tree truncated: {Truncated})",
+                        manifests.Count, owner, repo, tree.Truncated);
+                    if (manifests.Count > 0 || !tree.Truncated)
+                        return manifests;
                 }
             }
-
-            await _cache.SetAsync(cacheKey, Encoding.UTF8.GetBytes(decodedContent), new DistributedCacheEntryOptions
+            else
             {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(CacheDurationMinutes)
-            });
-
-            return decodedContent;
-        }
-        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
-        {
-            _logger.LogWarning("File not found: {Owner}/{Repo}/{FilePath}", owner, repo, filePath);
-            return null;
+                logger.LogWarning("GitHub tree request for {Owner}/{Repo} returned {Status}; probing root manifests instead",
+                    owner, repo, (int)response.StatusCode);
+            }
         }
         catch (HttpRequestException ex)
         {
-            _logger.LogError(ex, "Failed to fetch file {Owner}/{Repo}/{FilePath}", owner, repo, filePath);
-            throw;
+            logger.LogWarning(ex, "GitHub tree request for {Owner}/{Repo} failed; probing root manifests instead", owner, repo);
         }
+
+        return RootCandidates.Select(path => new ManifestFile(path, null)).ToList();
     }
+
+    internal IReadOnlyList<ManifestFile> SelectManifests(IEnumerable<GithubTreeEntry> entries) =>
+        entries
+            .Where(e => e.Type == "blob"
+                        && (e.Size is null || e.Size <= MaxManifestBytes)
+                        && parserFactory.IsManifest(e.Path)
+                        && !e.Path.Split('/')[..^1].Any(IgnoredDirectories.Contains))
+            // Shallow manifests first: the root project matters more than a deeply nested package.
+            .OrderBy(e => e.Path.Count(c => c == '/'))
+            .ThenBy(e => e.Path, StringComparer.Ordinal)
+            .Take(MaxManifests)
+            .Select(e => new ManifestFile(e.Path, e.Sha))
+            .ToList();
+
+    public async Task<string?> GetFileContentAsync(string owner, string repo, string gitRef, ManifestFile file, CancellationToken cancellationToken)
+    {
+        // Blob SHAs are content hashes, so a cached copy can never be stale.
+        var cacheKey = file.BlobSha is null ? null : $"github:blob:{file.BlobSha}";
+        if (cacheKey is not null && await cache.GetStringAsync(cacheKey, cancellationToken) is { } cached)
+            return cached;
+
+        var client = httpClientFactory.CreateClient(RawClientName);
+        var path = string.Join('/', file.Path.Split('/').Select(Escape));
+        using var response = await client.GetAsync($"{Escape(owner)}/{Escape(repo)}/{Escape(gitRef)}/{path}", cancellationToken);
+
+        if (response.StatusCode == HttpStatusCode.NotFound)
+            return null;
+        response.EnsureSuccessStatusCode();
+
+        var content = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (cacheKey is not null)
+        {
+            await cache.SetStringAsync(cacheKey, content,
+                new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromDays(7) }, cancellationToken);
+        }
+        return content;
+    }
+
+    private static string Escape(string value) => Uri.EscapeDataString(value);
 }
