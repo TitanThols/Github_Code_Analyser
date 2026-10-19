@@ -1,261 +1,271 @@
-using OSSDependencyAnalyzer.API.Models;
-using OSSDependencyAnalyzer.API.Data;
-using OSSDependencyAnalyzer.API.Integrations.Github;
-using OSSDependencyAnalyzer.API.Integrations.DependencyParsing;
-using OSSDependencyAnalyzer.API.Integrations.CVE;
-using OSSDependencyAnalyzer.API.Services;
+using Hangfire;
 using Microsoft.EntityFrameworkCore;
-using Serilog;
+using OSSDependencyAnalyzer.API.Data;
+using OSSDependencyAnalyzer.API.Domain;
+using OSSDependencyAnalyzer.API.Integrations.DependencyParsing;
+using OSSDependencyAnalyzer.API.Integrations.Github;
+using OSSDependencyAnalyzer.API.Integrations.Osv;
+using OSSDependencyAnalyzer.API.Models;
 
 namespace OSSDependencyAnalyzer.API.Services;
 
 public interface IAnalyzerService
 {
+    [AutomaticRetry(Attempts = 0)]
     Task AnalyzeRepositoryAsync(Guid repositoryId, CancellationToken cancellationToken);
 }
 
-public class AnalyzerService : IAnalyzerService
+/// <summary>An expected analysis failure whose message is safe to show to the user.</summary>
+public sealed class AnalysisException(string message) : Exception(message);
+
+/// <summary>
+/// Pipeline: GitHub metadata → manifest discovery → parse → normalise/dedupe → OSV batch lookup
+/// (+ CISA KEV) → risk scoring → persist → snapshot → notify. Idempotent: a re-scan replaces the
+/// previous dependency set and only alerts on vulnerabilities that weren't present before.
+/// </summary>
+public sealed class AnalyzerService(
+    AppDbContext db,
+    IGithubApiService github,
+    IDependencyParserFactory parserFactory,
+    IVulnerabilityService vulnerabilityService,
+    IRiskScoringService riskScoring,
+    ISnapshotService snapshots,
+    IAlertService alerts,
+    ILogger<AnalyzerService> logger) : IAnalyzerService
 {
-    private readonly AppDbContext _db;
-    private readonly IGithubApiService _githubApiService;
-    private readonly IDependencyParserFactory _parserFactory;
-    private readonly ICveService _cveService;
-    private readonly IRiskScoringService _riskScoringService;
-    private readonly ISnapshotService _snapshotservice;
-    private readonly IAlertService _alertService;
-    private readonly ILogger<AnalyzerService> _logger;
-
-    private static readonly List<string> DependencyFiles = new()
-    {
-        "package.json",
-        "requirements.txt",
-        "*.csproj",
-        "pom.xml",
-        "Gemfile",
-        "pyproject.toml"
-    };
-
-    public AnalyzerService(
-        AppDbContext db,
-        IGithubApiService githubApiService,
-        IDependencyParserFactory parserFactory,
-        ICveService cveService,
-        IRiskScoringService riskScoringService,
-        ISnapshotService snapshotservice,
-        IAlertService alertService,
-        ILogger<AnalyzerService> logger)
-    {
-        _db = db;
-        _githubApiService = githubApiService;
-        _parserFactory = parserFactory;
-        _cveService = cveService;
-        _riskScoringService = riskScoringService;
-        _snapshotservice = snapshotservice;
-        _alertService = alertService;
-        _logger = logger;
-    }
-
     public async Task AnalyzeRepositoryAsync(Guid repositoryId, CancellationToken cancellationToken)
     {
+        var repository = await db.Repositories.FirstOrDefaultAsync(r => r.Id == repositoryId, cancellationToken);
+        if (repository is null)
+        {
+            logger.LogWarning("Repository {RepositoryId} no longer exists; skipping analysis", repositoryId);
+            return;
+        }
+
+        using var scope = logger.BeginScope(new Dictionary<string, object> { ["RepositoryId"] = repositoryId });
+        var started = DateTimeOffset.UtcNow;
+
         try
         {
-            var repository = await _db.Repositories.FirstOrDefaultAsync(r => r.Id == repositoryId, cancellationToken);
-            if (repository == null)
+            var previousFindings = (await db.Vulnerabilities
+                    .Where(v => v.Dependency.RepositoryId == repositoryId)
+                    .Select(v => new { v.Dependency.PackageName, v.CveId })
+                    .ToListAsync(cancellationToken))
+                .Select(f => FindingKey(f.PackageName, f.CveId))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var isRescan = repository.LastAnalysedAt != default;
+
+            await UpdateStatusAsync(repository, Repository.AnalysisStatus.Parsing, cancellationToken);
+
+            var metadata = await github.GetRepositoryAsync(repository.RepositoryOwner, repository.RepositoryName, cancellationToken);
+            repository.Description = Truncate(metadata.Description, 1000);
+            repository.Language = metadata.Language;
+            repository.Stars = metadata.Stars;
+
+            var (parsed, manifestCount, warnings) = await CollectDependenciesAsync(repository, metadata.Ref, cancellationToken);
+            var dependencies = BuildDependencies(repositoryId, parsed);
+
+            await UpdateStatusAsync(repository, Repository.AnalysisStatus.FetchingVulnerabilities, cancellationToken);
+
+            var queries = dependencies
+                .Where(d => d.ResolvedVersion is not null)
+                .Select(d => new PackageQuery(d.PackageName, d.ResolvedVersion!, d.Type))
+                .Distinct()
+                .ToList();
+            var findings = await vulnerabilityService.FindVulnerabilitiesAsync(queries, cancellationToken);
+
+            var allVulnerabilities = new List<(Vulnerability Vulnerability, string PackageName)>();
+            foreach (var dependency in dependencies)
             {
-                _logger.LogError("Repository {RepositoryId} not found", repositoryId);
-                return;
-            }
+                if (dependency.ResolvedVersion is null
+                    || !findings.TryGetValue(new PackageQuery(dependency.PackageName, dependency.ResolvedVersion, dependency.Type), out var matches))
+                    continue;
 
-            repository.Status = Repository.AnalysisStatus.Parsing;
-            await _db.SaveChangesAsync(cancellationToken);
-
-            _logger.LogInformation("Starting analysis for {Url}", repository.GithubUrl);
-
-            var repoMetadata = await _githubApiService.GetRepositoryAsync(
-                repository.RepositoryOwner,
-                repository.RepositoryName
-            );
-
-            _logger.LogInformation("Fetched metadata for {Owner}/{Repo}",
-                repository.RepositoryOwner,
-                repository.RepositoryName);
-
-            var parsedDependencies = new List<ParsedDependency>();
-
-            foreach (var fileName in new[] { "package.json", "requirements.txt", "pom.xml", "Gemfile", "pyproject.toml" })
-            {
-                try
+                foreach (var vulnerability in matches)
                 {
-                    var fileContent = await _githubApiService.GetFileContentAsync(
-                        repository.RepositoryOwner,
-                        repository.RepositoryName,
-                        fileName
-                    );
-
-                    if (fileContent == null)
-                    {
-                        _logger.LogInformation("File {FileName} not found in repo", fileName);
-                        continue;
-                    }
-
-                    var parser = _parserFactory.TryGetParserByFileName(fileName);
-                    if (parser == null)
-                    {
-                        _logger.LogWarning("No parser found for {FileName}", fileName);
-                        continue;
-                    }
-
-                    var dependencies = await parser.ParseAsync(fileContent);
-                    parsedDependencies.AddRange(dependencies);
-
-                    _logger.LogInformation("Parsed {Count} dependencies from {FileName}",
-                        dependencies.Count,
-                        fileName);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to parse {FileName}", fileName);
+                    vulnerability.Id = Guid.NewGuid();
+                    vulnerability.DependencyId = dependency.Id;
+                    vulnerability.RiskScore = riskScoring.CalculateVulnerabilityRiskScore(vulnerability);
+                    dependency.Vulnerabilities.Add(vulnerability);
+                    allVulnerabilities.Add((vulnerability, dependency.PackageName));
                 }
             }
 
-            repository.Status = Repository.AnalysisStatus.FetchingVulnerabilities;
-            await _db.SaveChangesAsync(cancellationToken);
+            // Replace the previous scan's results in the same unit of work as the new ones.
+            var stale = await db.Dependencies
+                .Include(d => d.Vulnerabilities)
+                .Where(d => d.RepositoryId == repositoryId)
+                .ToListAsync(cancellationToken);
+            db.Dependencies.RemoveRange(stale);
+            db.Dependencies.AddRange(dependencies);
 
-            var allVulnerabilities = new List<Vulnerability>();
-            var criticalCount = 0;
-            var highCount = 0;
-            var mediumCount = 0;
-            var lowCount = 0;
-
-            foreach (var parsedDep in parsedDependencies)
-            {
-                var dependency = new Dependency
-                {
-                    Id = Guid.NewGuid(),
-                    RepositoryId = repositoryId,
-                    PackageName = parsedDep.PackageName,
-                    CurrentVersion = parsedDep.Version,
-                    Type = parsedDep.Type,
-                    DiscoveredAt = DateTime.UtcNow
-                };
-
-                _db.Dependencies.Add(dependency);
-                await _db.SaveChangesAsync(cancellationToken);
-
-                _logger.LogInformation("Added dependency {PackageName}/{Version}",
-                    parsedDep.PackageName,
-                    parsedDep.Version);
-
-                try
-                {
-                    var vulnerabilities = await _cveService.GetVulnerabilitiesForDependencyAsync(
-                        dependency.Id,
-                        parsedDep.PackageName,
-                        parsedDep.Version,
-                        parsedDep.Type
-                    );
-
-                    if (vulnerabilities.Any())
-                    {
-                        _logger.LogInformation("Found {Count} vulnerabilities for {PackageName}",
-                            vulnerabilities.Count,
-                            parsedDep.PackageName);
-
-                        foreach (var vuln in vulnerabilities)
-                        {
-                            vuln.Id = Guid.NewGuid();
-                            vuln.DependencyId = dependency.Id;
-
-                            var riskScore = _riskScoringService.CalculateVulnerabilityRiskScore(vuln);
-                            vuln.RiskScore = riskScore;
-
-                            allVulnerabilities.Add(vuln);
-
-                            switch (vuln.Severity)
-                            {
-                                case Severity.Critical:
-                                    criticalCount++;
-                                    break;
-                                case Severity.High:
-                                    highCount++;
-                                    break;
-                                case Severity.Medium:
-                                    mediumCount++;
-                                    break;
-                                case Severity.Low:
-                                    lowCount++;
-                                    break;
-                            }
-
-                            _logger.LogInformation(
-                                "CVE {CveId} found in {PackageName}: Severity={Severity}, RiskScore={RiskScore}",
-                                vuln.CveId,
-                                parsedDep.PackageName,
-                                vuln.Severity,
-                                riskScore
-                            );
-                        }
-
-                        _db.Vulnerabilities.AddRange(vulnerabilities);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to fetch vulnerabilities for {PackageName}",
-                        parsedDep.PackageName);
-                }
-            }
-
-            await _db.SaveChangesAsync(cancellationToken);
-
-            _logger.LogInformation(
-                "Saved {Count} vulnerabilities: Critical={Critical}, High={High}, Medium={Medium}, Low={Low}",
-                allVulnerabilities.Count,
-                criticalCount,
-                highCount,
-                mediumCount,
-                lowCount
-            );
-
+            var vulnerabilities = allVulnerabilities.Select(v => v.Vulnerability).ToList();
+            repository.TotalDependencies = dependencies.Count;
+            repository.ManifestCount = manifestCount;
+            repository.CriticalVulnerabilities = vulnerabilities.Count(v => v.Severity == Severity.Critical);
+            repository.HighVulnerabilities = vulnerabilities.Count(v => v.Severity == Severity.High);
+            repository.MediumVulnerabilities = vulnerabilities.Count(v => v.Severity == Severity.Medium);
+            repository.LowVulnerabilities = vulnerabilities.Count(v => v.Severity == Severity.Low);
+            repository.RiskScore = riskScoring.CalculateRepositoryRiskScore(vulnerabilities.Select(v => v.RiskScore));
             repository.Status = Repository.AnalysisStatus.Completed;
-            repository.CompletedAt = DateTime.UtcNow;
-            repository.LastAnalysedAt = DateTime.UtcNow;
-            repository.TotalDependencies = parsedDependencies.Count;
-            repository.CriticalVulnerabilities = criticalCount;
-            repository.HighVulnerabilities = highCount;
-            repository.MediumVulnerabilities = mediumCount;
+            repository.CompletedAt = DateTimeOffset.UtcNow;
+            repository.LastAnalysedAt = DateTimeOffset.UtcNow;
+            repository.ErrorMessage = warnings.Count == 0
+                ? null
+                : Truncate($"Skipped {warnings.Count} unreadable manifest(s): {string.Join("; ", warnings)}", 1000);
 
-            await _db.SaveChangesAsync(cancellationToken);
+            await db.SaveChangesAsync(cancellationToken);
+            await snapshots.CreateSnapshotAsync(repositoryId, cancellationToken);
 
-            foreach (var vuln in allVulnerabilities)
+            logger.LogInformation(
+                "Analysed {Owner}/{Repo} in {ElapsedMs} ms: {Manifests} manifests, {Dependencies} dependencies, {Vulnerabilities} vulnerabilities, risk {Risk}",
+                repository.RepositoryOwner, repository.RepositoryName, (DateTimeOffset.UtcNow - started).TotalMilliseconds,
+                manifestCount, dependencies.Count, vulnerabilities.Count, repository.RiskScore);
+
+            await alerts.SendAnalysisStatusAsync(repository, cancellationToken);
+            if (isRescan)
             {
-                await _alertService.SendVulnerabilityAlertAsync(repositoryId, vuln);
+                var introduced = allVulnerabilities
+                    .Where(v => !previousFindings.Contains(FindingKey(v.PackageName, v.Vulnerability.CveId)))
+                    .ToList();
+                await alerts.SendNewVulnerabilitiesAsync(repository, introduced, cancellationToken);
             }
-
-            await _snapshotservice.CreateVulnerabilitysnapshotAsync(repositoryId);
-
-            await _alertService.SendAnalysisCompletedAlertAsync(repositoryId, repository.RepositoryName);
-
-            _logger.LogInformation(
-                "Analysis completed for {Url}. Found {Dependencies} dependencies, {Vulns} vulnerabilities",
-                repository.GithubUrl,
-                parsedDependencies.Count,
-                allVulnerabilities.Count
-            );
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Server shutdown: Hangfire re-queues the job, so reset to Pending rather than Failed.
+            await MarkAsync(repositoryId, Repository.AnalysisStatus.Pending, null);
+            throw;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Analysis failed for repository {RepositoryId}", repositoryId);
-
-            var repository = await _db.Repositories.FirstOrDefaultAsync(r => r.Id == repositoryId);
-            if (repository != null)
+            var (message, expected) = ex switch
             {
-                repository.Status = Repository.AnalysisStatus.Failed;
-                repository.ErrorMessage = ex.Message;
-                await _db.SaveChangesAsync();
-            }
+                AnalysisException or GitHubRepositoryNotFoundException => (ex.Message, true),
+                HttpRequestException => ("An upstream service (GitHub or OSV.dev) is unavailable. Please try again in a few minutes.", true),
+                _ => ("Unexpected error while analysing the repository.", false)
+            };
 
-            throw;
+            if (expected)
+                logger.LogWarning(ex, "Analysis of {RepositoryId} failed: {Reason}", repositoryId, message);
+            else
+                logger.LogError(ex, "Analysis of {RepositoryId} failed unexpectedly", repositoryId);
+
+            var failed = await MarkAsync(repositoryId, Repository.AnalysisStatus.Failed, message);
+            if (failed is not null)
+                await alerts.SendAnalysisStatusAsync(failed, CancellationToken.None);
+
+            if (!expected)
+                throw;
         }
     }
+
+    private async Task<(List<(ParsedDependency Dependency, string ManifestPath)> Parsed, int ManifestCount, List<string> Warnings)>
+        CollectDependenciesAsync(Repository repository, string gitRef, CancellationToken cancellationToken)
+    {
+        var manifests = await github.FindManifestsAsync(repository.RepositoryOwner, repository.RepositoryName, gitRef, cancellationToken);
+        var parsed = new List<(ParsedDependency, string)>();
+        var warnings = new List<string>();
+        var manifestCount = 0;
+
+        foreach (var manifest in manifests)
+        {
+            var parser = parserFactory.TryGetParserByFileName(manifest.Path);
+            if (parser is null)
+                continue;
+
+            var content = await github.GetFileContentAsync(repository.RepositoryOwner, repository.RepositoryName, gitRef, manifest, cancellationToken);
+            if (content is null)
+                continue;
+
+            manifestCount++;
+            try
+            {
+                var dependencies = parser.Parse(content);
+                parsed.AddRange(dependencies.Select(d => (d, manifest.Path)));
+                logger.LogDebug("Parsed {Count} dependencies from {Path}", dependencies.Count, manifest.Path);
+            }
+            catch (DependencyParseException ex)
+            {
+                warnings.Add($"{manifest.Path} ({ex.Message})");
+            }
+        }
+
+        if (manifestCount == 0)
+            throw new AnalysisException(
+                "No supported dependency manifests were found (package.json, requirements.txt, pyproject.toml, pom.xml, " +
+                "build.gradle, *.csproj, Gemfile, go.mod, composer.json or Cargo.toml).");
+
+        if (parsed.Count == 0 && warnings.Count == manifestCount)
+            throw new AnalysisException($"Every manifest failed to parse: {string.Join("; ", warnings)}");
+
+        return (parsed, manifestCount, warnings);
+    }
+
+    /// <summary>
+    /// Collapses duplicates across manifests (monorepos, Central Package Management) into one row per
+    /// package version. Unpinnable declarations are dropped when a pinned one exists for the same package.
+    /// </summary>
+    internal static List<Dependency> BuildDependencies(Guid repositoryId, IEnumerable<(ParsedDependency Dependency, string ManifestPath)> parsed)
+    {
+        var result = new List<Dependency>();
+
+        foreach (var package in parsed.GroupBy(p => (p.Dependency.Type, Name: p.Dependency.PackageName.ToLowerInvariant())))
+        {
+            var candidates = package
+                .Select(p => (p.Dependency, p.ManifestPath, Resolved: VersionNormalizer.Normalize(p.Dependency.Version, p.Dependency.Type)))
+                .ToList();
+
+            var pinned = candidates.Where(c => c.Resolved is not null).ToList();
+            var versions = pinned.Count > 0
+                ? pinned.GroupBy(c => c.Resolved)
+                : candidates.GroupBy(c => (string?)null).Take(1);
+
+            foreach (var version in versions)
+            {
+                var first = version.First();
+                result.Add(new Dependency
+                {
+                    Id = Guid.NewGuid(),
+                    RepositoryId = repositoryId,
+                    PackageName = first.Dependency.PackageName,
+                    CurrentVersion = Truncate(first.Dependency.Version, 200)!,
+                    ResolvedVersion = version.Key,
+                    Type = first.Dependency.Type,
+                    ManifestPath = first.ManifestPath,
+                    IsDevDependency = version.All(c => c.Dependency.IsDev),
+                    DiscoveredAt = DateTimeOffset.UtcNow
+                });
+            }
+        }
+
+        return result.OrderBy(d => d.Type).ThenBy(d => d.PackageName, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private async Task UpdateStatusAsync(Repository repository, Repository.AnalysisStatus status, CancellationToken cancellationToken)
+    {
+        repository.Status = status;
+        repository.ErrorMessage = null;
+        await db.SaveChangesAsync(cancellationToken);
+        await alerts.SendAnalysisStatusAsync(repository, cancellationToken);
+    }
+
+    private async Task<Repository?> MarkAsync(Guid repositoryId, Repository.AnalysisStatus status, string? message)
+    {
+        db.ChangeTracker.Clear();
+        var repository = await db.Repositories.FirstOrDefaultAsync(r => r.Id == repositoryId, CancellationToken.None);
+        if (repository is null)
+            return null;
+
+        repository.Status = status;
+        repository.ErrorMessage = message;
+        if (status == Repository.AnalysisStatus.Failed)
+            repository.CompletedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(CancellationToken.None);
+        return repository;
+    }
+
+    private static string FindingKey(string packageName, string cveId) => $"{packageName}|{cveId}";
+
+    private static string? Truncate(string? value, int max) => value is null || value.Length <= max ? value : value[..max];
 }
