@@ -1,141 +1,101 @@
-using OSSDependencyAnalyzer.API.Data;
-using Microsoft.EntityFrameworkCore;
-using Serilog;
-using Microsoft.Extensions.Options;
-using Microsoft.AspNetCore.Mvc.ModelBinding;
-using Microsoft.AspNetCore.SignalR;
-using Scalar.AspNetCore;
-using Refit;
-using OSSDependencyAnalyzer.API.Integrations.Github;
-using OSSDependencyAnalyzer.API.Integrations.DependencyParsing;
-using OSSDependencyAnalyzer.API.Integrations.DependencyParsing.Parsers;
-using OSSDependencyAnalyzer.API.Integrations.DependencyParsing.Parsesrs;
 using Hangfire;
-using Hangfire.PostgreSql;
-using OSSDependencyAnalyzer.API.Services;
-using OSSDependencyAnalyzer.API.Integrations;
-using OSSDependencyAnalyzer.API.Integrations.CVE;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.EntityFrameworkCore;
+using OSSDependencyAnalyzer.API.Data;
+using OSSDependencyAnalyzer.API.Hubs;
+using OSSDependencyAnalyzer.API.Infrastructure;
 using OSSDependencyAnalyzer.API.Jobs;
+using Scalar.AspNetCore;
+using Serilog;
 
-public partial class Program
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseSerilog((context, services, logger) => logger
+    .ReadFrom.Configuration(context.Configuration)
+    .ReadFrom.Services(services)
+    .Enrich.FromLogContext()
+    .WriteTo.Console());
+
+builder.Services
+    .AddPersistence(builder.Configuration, builder.Environment)
+    .AddBackgroundJobs(builder.Configuration)
+    .AddAnalysisPipeline(builder.Configuration)
+    .AddWebSecurity(builder.Configuration, builder.Environment);
+
+builder.Services.AddControllers();
+builder.Services.AddProblemDetails();
+builder.Services.AddSignalR();
+builder.Services.AddOpenApi();
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
-    [Obsolete]
-    private static void Main(string[] args)
+    // PaaS load balancers terminate TLS and forward the original scheme/IP; their addresses aren't known up front.
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.KnownIPNetworks.Clear();
+    options.KnownProxies.Clear();
+});
+
+var app = builder.Build();
+
+app.UseForwardedHeaders();
+app.UseExceptionHandler();
+app.UseStatusCodePages();
+app.UseSerilogRequestLogging(options =>
+    options.GetLevel = (context, _, ex) =>
+        ex is not null || context.Response.StatusCode >= 500 ? Serilog.Events.LogEventLevel.Error
+        : context.Request.Path.StartsWithSegments("/health") ? Serilog.Events.LogEventLevel.Verbose
+        : Serilog.Events.LogEventLevel.Information);
+
+if (!app.Environment.IsDevelopment())
+    app.UseHsts();
+
+app.UseDefaultFiles();
+app.UseStaticFiles();
+app.UseRouting();
+if (app.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() is { Length: > 0 })
+    app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseRateLimiter();
+
+app.MapControllers();
+app.MapHub<AlertHub>(AlertHub.Path);
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") });
+
+if (app.Configuration.GetValue("ApiDocs:Enabled", true))
+{
+    app.MapOpenApi();
+    app.MapScalarApiReference(options => options.WithTitle("DepScan API"));
+}
+
+if (app.Configuration.GetValue("Hangfire:Enabled", true) && app.Environment.IsDevelopment())
+    app.MapHangfireDashboard("/hangfire");
+
+// Unknown API routes are 404s, not the SPA shell; everything else falls through to the React router.
+app.Map("/api/{**path}", () => Results.NotFound());
+if (File.Exists(Path.Combine(app.Environment.WebRootPath ?? "wwwroot", "index.html")))
+    app.MapFallbackToFile("index.html");
+
+await InitializeAsync(app);
+app.Run();
+
+static async Task InitializeAsync(WebApplication app)
+{
+    await using var scope = app.Services.CreateAsyncScope();
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    if (db.Database.IsRelational())
+        await db.Database.MigrateAsync();
+    else
+        await db.Database.EnsureCreatedAsync();
+
+    if (app.Configuration.GetValue("Hangfire:Enabled", true))
     {
-        var builder = WebApplication.CreateBuilder(args);
-
-        builder.Services.AddTransient<IDependencyParser, NpmPackageJsonParser>();
-        builder.Services.AddTransient<IDependencyParser, CsProjParser>();
-        builder.Services.AddTransient<IDependencyParser, GemfileParser>();
-        builder.Services.AddTransient<IDependencyParser, PomXmlParser>();
-        builder.Services.AddTransient<IDependencyParser, PyprojectTomlParser>();
-        builder.Services.AddTransient<IDependencyParser, PythonRequirementsParser>();
-        builder.Services.AddTransient<IRiskScoringService, RiskScoringService>();
-        builder.Services.AddTransient<IDependencyParserFactory, DependencyParserFactory>();
-        builder.Services.AddTransient<ICveService, CveService>();
-        builder.Services.AddTransient<IAnalyzerService, AnalyzerService>();
-        builder.Services.AddTransient<ISnapshotService, SnapshotService>();
-        builder.Services.AddTransient<IAlertService, AlertService>();
-
-        Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Information()
-            .WriteTo.Console()
-            .CreateLogger();
-
-        builder.Host.UseSerilog();
-
-
-        builder.Services.AddControllers();
-        builder.Services.AddEndpointsApiExplorer();
-        builder.Services.AddOpenApi();
-        builder.Services.AddSignalR();
-
-        var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-        builder.Services.AddDbContext<AppDbContext>(options =>
-            options.UseNpgsql(connectionString)
-            .EnableSensitiveDataLogging(builder.Environment.IsDevelopment())
-        );
-
-        builder.Services.AddHangfire(config =>
-            config.UsePostgreSqlStorage(connectionString)
-        );
-        builder.Services.AddHangfireServer();
-
-        var githubToken = builder.Configuration["GithubApi:Token"];
-
-        builder.Services.AddRefitClient<IGithubApiClient>()
-            .ConfigureHttpClient(c =>
-            {
-                c.BaseAddress = new Uri("https://api.github.com");
-                c.DefaultRequestHeaders.Add("Authorization", $"Bearer {githubToken}");
-                c.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
-                c.DefaultRequestHeaders.Add("Accept", "application/vnd.github.v3.raw");
-                c.DefaultRequestHeaders.Add("User-Agent", "OSSDependencyAnalyzer");
-            });
-
-        builder.Services.AddRefitClient<IgithubAdvisoriesClient>()
-            .ConfigureHttpClient(c =>
-            {
-                c.BaseAddress = new Uri("https://api.github.com");
-                c.DefaultRequestHeaders.Add("Authorization", $"Bearer {githubToken}");
-                c.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
-            });
-
-        builder.Services.AddRefitClient<INvdApiClient>()
-            .ConfigureHttpClient(c =>
-            {
-                c.BaseAddress = new Uri("https://services.nvd.nist.gov/rest/json/cves/2.0");
-                c.DefaultRequestHeaders.Add("User-Agent", "OSSDependencyAnalyzer");
-            });
-
-        builder.Services.AddTransient<IGithubApiService, GithubApiService>();
-
-        builder.Services.AddStackExchangeRedisCache(Options =>
-        {
-            Options.Configuration = builder.Configuration.GetConnectionString("Redis");
-        });
-
-        builder.Services.AddCors(options =>
-        {
-            options.AddPolicy("ReactLocalhost", policy =>
-            {
-                policy.WithOrigins("http://localhost:5173", "http://localhost:3000")
-                    .AllowAnyMethod()
-                    .AllowAnyHeader()
-                    .AllowCredentials();
-            });
-        });
-
-        var app = builder.Build();
-
-        var recurringJobManager = app.Services.GetRequiredService<IRecurringJobManager>();
-        recurringJobManager.AddOrUpdate<DailySnapshotJob>(
-            "daily-vulnerability-snapshots",
-            x => x.ExecuteAsync(),
-            Cron.Daily
-        );
-
-        if (app.Environment.IsDevelopment())
-        {
-            app.MapOpenApi();
-            app.MapScalarApiReference();
-        }
-
-        app.UseCors("ReactLocalhost");
-        app.UseHttpsRedirection();
-        app.UseAuthorization();
-        app.MapControllers();
-        app.MapHub<AlertHub>("/hubs/alerts");
-        app.MapHangfireDashboard();
-
-        app.Run();
+        var recurringJobs = scope.ServiceProvider.GetRequiredService<IRecurringJobManager>();
+        recurringJobs.RemoveIfExists("daily-vulnerability-snapshots"); // superseded by the daily re-scan
+        recurringJobs.AddOrUpdate<DailyRescanJob>(DailyRescanJob.RecurringJobId, job => job.ExecuteAsync(), "0 3 * * *");
     }
 }
 
-public class AlertHub : Microsoft.AspNetCore.SignalR.Hub
-{
-    public async Task SendAlert(string message)
-    {
-        await Clients.All.SendAsync("ReceiveAlert", message);
-    }
-}
+/// <summary>Exposed for WebApplicationFactory in integration tests.</summary>
+public partial class Program;
