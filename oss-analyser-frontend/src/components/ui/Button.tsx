@@ -1,21 +1,22 @@
-interface ButtonProps {
-    label: string;
-    onClick: () => void;
-    variant?: 'primary' | 'secondary';
-    disabled?: boolean;
+import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from 'react'
+import { Loader2 } from 'lucide-react'
+import { buttonClasses, type ButtonSize, type ButtonVariant } from './buttonStyles'
+
+export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: ButtonVariant
+  size?: ButtonSize
+  loading?: boolean
+  icon?: ReactNode
 }
 
-const Button = ({ label, onClick, variant = 'primary', disabled = false }: ButtonProps) => {
-    return (
-        <button
-            className={`btn btn-${variant}`}
-            onClick={onClick}
-            disabled={disabled}
-        >
-            {label}
-        </button>
-    );
-}
-
-export default Button;
-
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { variant = 'primary', size = 'md', loading = false, icon, className, children, disabled, type = 'button', ...props },
+  ref,
+) {
+  return (
+    <button ref={ref} type={type} className={buttonClasses(variant, size, className)} disabled={disabled || loading} aria-busy={loading || undefined} {...props}>
+      {loading ? <Loader2 className="size-4 animate-spin" aria-hidden /> : icon}
+      {children}
+    </button>
+  )
+})

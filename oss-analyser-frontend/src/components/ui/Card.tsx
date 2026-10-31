@@ -1,17 +1,25 @@
-import type { ReactNode } from "react";
+import type { HTMLAttributes, ReactNode } from 'react'
+import { cn } from '../../lib/cn'
 
-interface CardProps {
-    title?: string,
-    children: ReactNode;
+export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
+  return <div className={cn('rounded-2xl border border-border bg-surface shadow-card', className)} {...props} />
 }
 
-const Card = ({ title, children }: CardProps) => {
-    return (
-        <div className="card">
-            {title && <h3 className="card-title">{title}</h3>}
-            {children}
-        </div>
-    );
-};
+interface CardHeaderProps {
+  title: ReactNode
+  description?: ReactNode
+  action?: ReactNode
+  className?: string
+}
 
-export default Card;
+export function CardHeader({ title, description, action, className }: CardHeaderProps) {
+  return (
+    <div className={cn('flex flex-wrap items-start justify-between gap-3 px-5 pt-5', className)}>
+      <div className="min-w-0">
+        <h2 className="text-[15px] font-semibold text-fg">{title}</h2>
+        {description && <p className="mt-0.5 text-sm text-fg-subtle">{description}</p>}
+      </div>
+      {action}
+    </div>
+  )
+}
