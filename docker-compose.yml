@@ -1,0 +1,48 @@
+# Local full stack: PostgreSQL + Redis + the production image.
+#   cp .env.example .env && docker compose up --build
+# then open http://localhost:8080
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-depscan}
+      POSTGRES_USER: ${POSTGRES_USER:-depscan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-depscan}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  app:
+    build: .
+    environment:
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-depscan};Username=${POSTGRES_USER:-depscan};Password=${POSTGRES_PASSWORD:-depscan}
+      ConnectionStrings__Redis: redis:6379
+      GithubApi__Token: ${GITHUB_TOKEN:-}
+      # Plain http on localhost: Development lets the auth cookie work without TLS.
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
