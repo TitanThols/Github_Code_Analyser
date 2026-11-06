@@ -92,7 +92,7 @@ export function LoginPage() {
           <Logo className="mb-10 text-lg lg:hidden" />
           <h2 className="text-2xl font-semibold tracking-tight text-fg">{mode === 'sign-in' ? 'Welcome back' : 'Create your account'}</h2>
           <p className="mt-1 text-sm text-fg-muted">
-            {mode === 'sign-in' ? 'Sign in to view your repositories and alerts.' : 'Free, and it takes ten seconds.'}
+            {mode === 'sign-in' ? 'Sign in to view your repositories and alerts.' : 'Sign up to start scanning repositories.'}
           </p>
 
           <div className="mt-6 grid grid-cols-2 rounded-lg bg-surface-2 p-1" role="tablist" aria-label="Account">
@@ -112,9 +112,9 @@ export function LoginPage() {
 
           <form onSubmit={submit} className="mt-6 space-y-4">
             {mode === 'register' && (
-              <Field label="Name" icon={UserRound} autoComplete="name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} minLength={2} maxLength={80} required placeholder="Ada Lovelace" />
+              <Field label="Name" icon={UserRound} autoComplete="name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} minLength={2} maxLength={80} required placeholder="Your name" />
             )}
-            <Field label="Email" icon={Mail} type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} maxLength={254} required placeholder="you@company.com" />
+            <Field label="Email" icon={Mail} type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} maxLength={254} required placeholder="Email address" />
             <Field
               label="Password"
               icon={LockKeyhole}
@@ -125,7 +125,7 @@ export function LoginPage() {
               minLength={mode === 'register' ? 12 : 1}
               maxLength={128}
               required
-              placeholder={mode === 'register' ? 'At least 12 characters' : '••••••••••••'}
+              placeholder={mode === 'register' ? 'Minimum 12 characters' : 'Password'}
             />
             {error && (
               <p role="alert" className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-fg">
