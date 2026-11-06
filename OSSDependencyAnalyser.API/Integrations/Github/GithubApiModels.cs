@@ -1,35 +1,37 @@
-namespace OSSDependencyAnalyzer.API.Integrations.API;
+using System.Text.Json.Serialization;
 
-public class GithubRepositoryDto
+namespace OSSDependencyAnalyzer.API.Integrations.Github;
+
+public sealed class GithubRepositoryDto
 {
-    public long Id { get; set; }
-    public string Name { get; set; } = null!;
-    public string Full_Name { get; set; } = null!;
-    public string Owner { get; set; } = null!;
-    public string? Language { get; set; }
-    public int Stargazers_Count { get; set; }
-    public int Forks_Count { get; set; }
+    [JsonPropertyName("name")] public string Name { get; set; } = string.Empty;
+    [JsonPropertyName("full_name")] public string FullName { get; set; } = string.Empty;
+    [JsonPropertyName("description")] public string? Description { get; set; }
+    [JsonPropertyName("language")] public string? Language { get; set; }
+    [JsonPropertyName("stargazers_count")] public int StargazersCount { get; set; }
+    [JsonPropertyName("default_branch")] public string? DefaultBranch { get; set; }
+    [JsonPropertyName("private")] public bool Private { get; set; }
 }
 
-public class GithubFileContentDto
+public sealed class GithubTreeResponse
 {
-    public string Name { get; set; } = null!;
-    public string Path { get; set; } = null!;
-    public string Type { get; set; } = null!;
-    public string? Content { get; set; }
-    public string? Download_Url { get; set; }   
+    [JsonPropertyName("sha")] public string Sha { get; set; } = string.Empty;
+    [JsonPropertyName("truncated")] public bool Truncated { get; set; }
+    [JsonPropertyName("tree")] public List<GithubTreeEntry> Tree { get; set; } = [];
 }
 
-public class GithubDirectoryContentDto
+public sealed class GithubTreeEntry
 {
-    public string Name { get; set; } = null!;
-    public string Path { get; set; } = null!;
-    public string Type { get; set; } = null!;
-    public string Url { get; set; } = null!;
+    [JsonPropertyName("path")] public string Path { get; set; } = string.Empty;
+    [JsonPropertyName("type")] public string Type { get; set; } = string.Empty;
+    [JsonPropertyName("sha")] public string? Sha { get; set; }
+    [JsonPropertyName("size")] public long? Size { get; set; }
 }
 
-public class GithubErrorDto
-{
-    public string? Message { get; set; }
-    public string? Documentation_Url { get; set; }
-}
+/// <summary>A manifest found in the repository. <see cref="BlobSha"/> is null when discovered by probing.</summary>
+public sealed record ManifestFile(string Path, string? BlobSha);
+
+public sealed record RepositoryMetadata(string? Description, string? Language, int? Stars, string Ref);
+
+public sealed class GitHubRepositoryNotFoundException(string fullName)
+    : Exception($"Repository '{fullName}' was not found on GitHub, or it is private.");

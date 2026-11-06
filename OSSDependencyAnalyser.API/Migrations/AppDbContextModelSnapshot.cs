@@ -17,10 +17,29 @@ namespace OSSDependencyAnalyzer.Api.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.9")
+                .HasAnnotation("ProductVersion", "10.0.14")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("Microsoft.AspNetCore.DataProtection.EntityFrameworkCore.DataProtectionKey", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("FriendlyName")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Xml")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("DataProtectionKeys");
+                });
 
             modelBuilder.Entity("OSSDependencyAnalyzer.API.Models.Dependency", b =>
                 {
@@ -35,7 +54,13 @@ namespace OSSDependencyAnalyzer.Api.Migrations
                     b.Property<DateTimeOffset>("DiscoveredAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<bool>("IsDevDependency")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("LatestVersion")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ManifestPath")
                         .HasColumnType("text");
 
                     b.Property<string>("PackageName")
@@ -45,12 +70,13 @@ namespace OSSDependencyAnalyzer.Api.Migrations
                     b.Property<Guid>("RepositoryId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("ResolvedVersion")
+                        .HasColumnType("text");
+
                     b.Property<int>("Type")
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("RepositoryId");
 
                     b.HasIndex("RepositoryId", "PackageName");
 
@@ -72,29 +98,52 @@ namespace OSSDependencyAnalyzer.Api.Migrations
                     b.Property<int>("CriticalVulnerabilities")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Description")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
                     b.Property<string>("ErrorMessage")
                         .HasColumnType("text");
 
                     b.Property<string>("GithubUrl")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
 
                     b.Property<int>("HighVulnerabilities")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Language")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.Property<DateTimeOffset>("LastAnalysedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("LowVulnerabilities")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ManifestCount")
+                        .HasColumnType("integer");
 
                     b.Property<int>("MediumVulnerabilities")
                         .HasColumnType("integer");
 
                     b.Property<string>("RepositoryName")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
 
                     b.Property<string>("RepositoryOwner")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<double>("RiskScore")
+                        .HasColumnType("double precision");
+
+                    b.Property<int?>("Stars")
+                        .HasColumnType("integer");
 
                     b.Property<int>("Status")
                         .HasColumnType("integer");
@@ -102,12 +151,46 @@ namespace OSSDependencyAnalyzer.Api.Migrations
                     b.Property<int>("TotalDependencies")
                         .HasColumnType("integer");
 
+                    b.Property<Guid?>("UserId")
+                        .HasColumnType("uuid");
+
                     b.HasKey("Id");
 
-                    b.HasIndex("GithubUrl")
+                    b.HasIndex("Status");
+
+                    b.HasIndex("UserId", "GithubUrl")
                         .IsUnique();
 
                     b.ToTable("Repositories");
+                });
+
+            modelBuilder.Entity("OSSDependencyAnalyzer.API.Models.UserAccount", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("PasswordHash")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Email")
+                        .IsUnique();
+
+                    b.ToTable("UserAccounts");
                 });
 
             modelBuilder.Entity("OSSDependencyAnalyzer.API.Models.Vulnerability", b =>
@@ -116,7 +199,13 @@ namespace OSSDependencyAnalyzer.Api.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("AdvisoryId")
+                        .HasColumnType("text");
+
                     b.Property<string>("AffectedVersionRange")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Aliases")
                         .HasColumnType("text");
 
                     b.Property<string>("CveId")
@@ -148,8 +237,14 @@ namespace OSSDependencyAnalyzer.Api.Migrations
                     b.Property<DateTime>("PublishedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("ReferenceUrl")
+                        .HasColumnType("text");
+
                     b.Property<string>("RemediationVersion")
                         .HasColumnType("text");
+
+                    b.Property<double>("RiskScore")
+                        .HasColumnType("double precision");
 
                     b.Property<int>("Severity")
                         .HasColumnType("integer");
@@ -196,6 +291,9 @@ namespace OSSDependencyAnalyzer.Api.Migrations
                     b.Property<Guid>("RepositoryId")
                         .HasColumnType("uuid");
 
+                    b.Property<double>("RiskScore")
+                        .HasColumnType("double precision");
+
                     b.Property<DateTime>("SnapshotDate")
                         .HasColumnType("timestamp with time zone");
 
@@ -204,9 +302,7 @@ namespace OSSDependencyAnalyzer.Api.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("RepositoryId");
-
-                    b.HasIndex("SnapshotDate");
+                    b.HasIndex("RepositoryId", "SnapshotDate");
 
                     b.ToTable("VulnerabilitySnapshots");
                 });
@@ -220,6 +316,14 @@ namespace OSSDependencyAnalyzer.Api.Migrations
                         .IsRequired();
 
                     b.Navigation("Repository");
+                });
+
+            modelBuilder.Entity("OSSDependencyAnalyzer.API.Models.Repository", b =>
+                {
+                    b.HasOne("OSSDependencyAnalyzer.API.Models.UserAccount", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade);
                 });
 
             modelBuilder.Entity("OSSDependencyAnalyzer.API.Models.Vulnerability", b =>

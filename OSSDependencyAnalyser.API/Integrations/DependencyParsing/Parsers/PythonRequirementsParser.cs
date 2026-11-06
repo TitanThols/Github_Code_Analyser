@@ -1,80 +1,74 @@
+using System.Text.RegularExpressions;
 using OSSDependencyAnalyzer.API.Models;
-using Serilog;
 
-namespace OSSDependencyAnalyzer.API.Integrations.DependencyParsing.Parsesrs;
+namespace OSSDependencyAnalyzer.API.Integrations.DependencyParsing.Parsers;
 
-public class PythonRequirementsParser : IDependencyParser
+public sealed partial class PythonRequirementsParser : IDependencyParser
 {
-    private readonly ILogger<PythonRequirementsParser> _logger;
     public DependencyFileType FileType => DependencyFileType.RequirementsTxt;
-    public PythonRequirementsParser(ILogger<PythonRequirementsParser> logger)
-    {
-        _logger = logger;
-    }
 
-    public async Task<List<ParsedDependency>> ParseAsync(string fileContent)
+    // requirements.txt, requirements-dev.txt, requirements/prod.txt (matched by name only), dev-requirements.txt
+    public bool CanParse(string fileName) =>
+        fileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)
+        && fileName.Contains("requirements", StringComparison.OrdinalIgnoreCase);
+
+    public IReadOnlyList<ParsedDependency> Parse(string fileContent)
     {
         var dependencies = new List<ParsedDependency>();
-        try
-        {
-            var lines = fileContent.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
-            foreach (var line in lines)
-            {
-                var trimmed = line.Trim();
 
-                if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("#"))
-                    continue;
-
-                var packageInfo = ParsePackageLine(trimmed);
-                if (packageInfo != null)
-                {
-                    dependencies.Add(packageInfo);
-                }
-            }
-            _logger.LogInformation("Parsed {Count} Python dependencies from requirements.txt", dependencies.Count);
-        }
-        catch (Exception ex)
+        foreach (var rawLine in fileContent.Split(["\r\n", "\r", "\n"], StringSplitOptions.None))
         {
-            _logger.LogError(ex, "Failed to pare requirements.txt");
-            throw;
+            var line = StripComment(rawLine).Trim().TrimEnd('\\').Trim();
+
+            // Options (-r other.txt, -e ., --index-url ...) are not packages.
+            if (line.Length == 0 || line.StartsWith('-'))
+                continue;
+
+            if (TryParsePep508(line, out var name, out var spec))
+                dependencies.Add(new ParsedDependency(name, spec, DependencyType.PyPI));
         }
+
         return dependencies;
     }
-    private ParsedDependency? ParsePackageLine(string line)
+
+    /// <summary>
+    /// Parses a PEP 508 requirement ("requests[socks]>=2.0,<3; python_version>'3.8'") into name and version spec.
+    /// Direct URL references ("pkg @ https://...") yield the name with an "unknown" spec.
+    /// </summary>
+    internal static bool TryParsePep508(string requirement, out string name, out string spec)
     {
-        var operators = new[] { "==", ">=", "<=", ">", "<", "~=", "!=" };
+        name = spec = string.Empty;
 
-        foreach (var op in operators)
-        {
-            var parts = line.Split([op], StringSplitOptions.None);
-            if (parts.Length >= 2)
-            {
-                var packageName = parts[0].Trim();
-                if (packageName.Contains("["))
-                    packageName = packageName.Split("[")[0];
+        var markerIndex = requirement.IndexOf(';');
+        if (markerIndex >= 0)
+            requirement = requirement[..markerIndex];
 
-                var version = parts[1].Split(",")[0].Trim();
+        var match = Pep508().Match(requirement.Trim());
+        if (!match.Success)
+            return false;
 
-                return new ParsedDependency
-                {
-                    PackageName = packageName,
-                    Version = version,
-                    Type = DependencyType.PyPI
-                };
+        name = match.Groups["name"].Value;
+        var rest = match.Groups["rest"].Value.Trim();
 
-            }
-        }
+        if (rest.StartsWith('@') || rest.Contains("://", StringComparison.Ordinal))
+            spec = "unknown";
+        else
+            spec = rest.Trim('(', ')', ' ') is { Length: > 0 } s ? s.Replace(" ", string.Empty) : "unknown";
 
-        if (!line.Contains("["))
-        {
-            return new ParsedDependency
-            {
-                PackageName = line,
-                Version = "unknown",
-                Type = DependencyType.PyPI
-            };
-        }
-
-        return null;
+        return true;
     }
-} 
+
+    private static string StripComment(string line)
+    {
+        // A '#' starts a comment only at line start or after whitespace (URLs may contain '#egg=').
+        for (var i = 0; i < line.Length; i++)
+        {
+            if (line[i] == '#' && (i == 0 || char.IsWhiteSpace(line[i - 1])))
+                return line[..i];
+        }
+        return line;
+    }
+
+    [GeneratedRegex(@"^(?<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(?:\[[^\]]*\])?\s*(?<rest>.*)$")]
+    private static partial Regex Pep508();
+}

@@ -43,7 +43,6 @@ yarn-error.log*
 
 node_modules/
 npm-debug.log
-package-lock.json
 yarn.lock
 dist/
 build/
@@ -102,4 +101,11 @@ dist/
 
 .DS_Store
 Thumbs.db
-.gitkeep
+
+# ============================================================================
+# Test output & build artefacts
+# ============================================================================
+
+TestResults/
+coverage/
+OSSDependencyAnalyser.API/wwwroot/

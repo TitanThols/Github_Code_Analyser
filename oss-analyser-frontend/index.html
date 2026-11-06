@@ -4,7 +4,20 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>github-analyser-frontend</title>
+    <meta name="description" content="DepScan scans GitHub repositories for vulnerable open-source dependencies across npm, PyPI, Maven, NuGet, RubyGems, Go, Packagist and crates.io." />
+    <meta name="theme-color" content="#0f0f0e" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f7f7f5" media="(prefers-color-scheme: light)" />
+    <title>DepScan · Dependency risk intelligence</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <script>
+      // Apply the saved theme before first paint to avoid a light/dark flash.
+      try {
+        var t = localStorage.getItem('depscan.theme');
+        if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>
